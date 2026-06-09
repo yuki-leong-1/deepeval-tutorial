@@ -1,0 +1,5 @@
+input,expected_output
+"What is your return window?","You can return items within 30 days of delivery."
+"Do you ship internationally?","Yes, we ship to over 50 countries with calculated shipping at checkout."
+"How long does delivery take?","Standard delivery takes 3-5 business days within the country."
+"Can I cancel an order after placing it?","You can cancel within 1 hour of ordering; after that it has shipped."

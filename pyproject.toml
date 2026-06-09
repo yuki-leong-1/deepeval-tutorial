@@ -1,0 +1,13 @@
+[project]
+name = "deepeval-tutorial"
+version = "0.1.0"
+description = "Step-by-step, runnable tutorial for the DeepEval LLM evaluation framework"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "deepeval>=4.0.5",
+    "jiwer>=4.0.0",
+    "pandas>=3.0.3",
+    "python-dotenv>=1.2.2",
+    "sacrebleu>=2.6.0",
+]
