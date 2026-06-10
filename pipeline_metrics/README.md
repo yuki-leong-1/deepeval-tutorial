@@ -1,72 +1,73 @@
-# Pipeline Metrics — 哪些能 measure?能不能一起?
+# Pipeline Metrics — What Can Be Measured, and Can They Run Together?
 
-针对图里 "Metric Runner" 的每一个指标:**能不能测量,用什么方法,能不能放一起 `evaluate()`。**
+Covers every metric from the "Metric Runner" diagram: **can it be measured, how, and can it share a single `evaluate()` call?**
 
-## 一句话结论
+## TL;DR
 
-- **能不能一起 measure 的判断规则**:同一次 `evaluate(test_cases=[tc], metrics=[...])` 里,所有 metric 都跑在**同一个 `LLMTestCase`** 上。只要某个 metric 是单轮 `BaseMetric`,且它读的 `actual_output / expected_output` 含义一致,就能放一起。
-- 所以**按流水线阶段分文件**:翻译 / STT / TTS / 系统,每个阶段内部能一起测;**跨阶段不能**(因为同一个 `actual_output` 在翻译阶段是译文、在 STT 阶段是转写文本,含义不同,放一起会算出垃圾分数)。
-- DeepEval 没有内置 WER/chrF++/COMET,但**任何打分器都能包成自定义 `BaseMetric`**,包完就能和 GEval 一起跑。
-- **系统指标**(延迟/成本/失败率)不是"给输出内容打分",大多要靠埋点;按 + 单轮门槛 / 聚合 拆开。
+- **Rule for running metrics together:** inside one `evaluate(test_cases=[tc], metrics=[...])`, every metric runs against the **same `LLMTestCase`**. As long as each metric is a single-turn `BaseMetric` and reads `actual_output` / `expected_output` with the same meaning, they can be batched together.
+- **Split by pipeline stage:** translation / STT / TTS / system each get their own file. Metrics within a stage can run together; **cross-stage they cannot** — the same `actual_output` field means "translated text" in the translation stage and "transcribed text" in the STT stage, so mixing them produces meaningless scores.
+- DeepEval has no built-in WER / chrF++ / COMET, but **any scorer can be wrapped as a custom `BaseMetric`** and then runs alongside GEval in a single `evaluate()`.
+- **System metrics** (latency / cost / failure rate) are not "score the output content" metrics. Most require instrumentation; per-turn threshold checks and aggregate calculations are handled separately.
 
-## 逐项对照表
+## Metric Reference
 
-| 图中指标 | 能 measure? | 方法 / 库 | 放哪个文件(一起) | 要 API key? |
+| Metric | Measurable? | Method / Library | File (grouped with) | API key? |
 |---|---|---|---|---|
-| **COMET / XCOMET** | ✅ 可,较重 | `unbabel-comet`(神经网络,需下载 ~2GB 模型)→ 包成 `CometMetric` | `01_translation_metrics.py`(默认关,`USE_COMET=1` 开) | 否(但要装重依赖) |
-| **chrF++** | ✅ 可 | `sacrebleu.sentence_chrf(word_order=2)` → `ChrfppMetric` | `01`(和下面一起) | 否 |
-| **LLM judge via DeepEval** | ✅ 可 | DeepEval 原生 `GEval` | `01` | **是** |
-| **number accuracy** | ✅ 可 | 正则抽数字比对 → `NumberAccuracyMetric`(确定性) | `01` | 否 |
-| **unit accuracy** | ✅ 可 | 单位词典比对 → `UnitAccuracyMetric`(确定性) | `01` | 否 |
-| **drug accuracy** | ✅ 可 | 语义判断 → `GEval`(临床判官) | `01` | **是** |
-| **negation accuracy** | ✅ 可 | 语义判断 → `GEval` | `01` | **是** |
-| **frequency accuracy** | ✅ 可 | 语义判断 → `GEval` | `01` | **是** |
-| **critical fact accuracy** | ✅ 可 | 语义判断 → `GEval` | `01` | **是** |
-| **WER** | ✅ 可 | `jiwer.wer` → `WERMetric` | `02_stt_metrics.py` | 否 |
-| **CER** | ✅ 可 | `jiwer.cer` → `CERMetric` | `02` | 否 |
-| **medical term WER** | ✅ 可 | 过滤医学词后算 WER → `MedicalTermWERMetric` | `02` | 否 |
-| **number WER** | ✅ 可 | 只保留数字后算 WER → `NumberWERMetric` | `02` | 否 |
-| **ASR loopback WER** | ✅ 可 | TTS→ASR 回环后 `jiwer.wer` → `ASRLoopbackWERMetric` | `03_tts_audio_metrics.py` | 否 |
-| **pronunciation flags** | ⚠️ 部分 | 检测要靠**音频模型/强制对齐**(DeepEval 外);分数由你算好后,用 `metadata` 传进来当门槛 | `03`(读 `metadata`) | 否 |
-| **intelligibility** | ⚠️ 部分 | 同上,要 **MOS/STOI 预测模型**;算好的 0–1 分用 `metadata` 传进来 | `03`(读 `metadata`) | 否 |
-| **time to first audio** | ✅ 可(门槛) | 埋点计时 → `metadata['ttfa_s']` → `TimeToFirstAudioMetric` | `04_system_metrics.py`(A 部分) | 否 |
-| **end-to-end turn latency** | ✅ 可(门槛) | 埋点计时 → `LLMTestCase.completion_time` → `MaxLatencyMetric` | `04`(A 部分) | 否 |
-| **cost per minute** | ❌ 非单轮 metric | **聚合量** = 总成本 / 总音频分钟,用普通 Python 算 | `04`(B 部分,**单独**) | 否 |
-| **failure rate** | ❌ 非单轮 metric | **聚合量** = 失败轮数 / 总轮数,用普通 Python 算 | `04`(B 部分,**单独**) | 否 |
+| **COMET / XCOMET** | ✅ yes (heavy) | `unbabel-comet` (neural, ~2 GB model download) → `CometMetric` | `01_translation_metrics.py` (off by default; enable with `USE_COMET=1`) | No (but requires heavy dep) |
+| **chrF++** | ✅ yes | `sacrebleu.sentence_chrf(word_order=2)` → `ChrfppMetric` | `01` | No |
+| **LLM judge via DeepEval** | ✅ yes | DeepEval native `GEval` | `01` | **Yes** |
+| **number accuracy** | ✅ yes | Regex digit extraction + comparison → `NumberAccuracyMetric` (deterministic) | `01` | No |
+| **unit accuracy** | ✅ yes | Unit lexicon lookup → `UnitAccuracyMetric` (deterministic) | `01` | No |
+| **drug accuracy** | ✅ yes | Semantic judgement → `GEval` (clinical judge) | `01` | **Yes** |
+| **negation accuracy** | ✅ yes | Semantic judgement → `GEval` | `01` | **Yes** |
+| **frequency accuracy** | ✅ yes | Semantic judgement → `GEval` | `01` | **Yes** |
+| **critical fact accuracy** | ✅ yes | Semantic judgement → `GEval` | `01` | **Yes** |
+| **WER** | ✅ yes | `jiwer.wer` → `WERMetric` | `02_stt_metrics.py` | No |
+| **CER** | ✅ yes | `jiwer.cer` → `CERMetric` | `02` | No |
+| **medical term WER** | ✅ yes | Filter to medical terms then compute WER → `MedicalTermWERMetric` | `02` | No |
+| **number WER** | ✅ yes | Filter to digits then compute WER → `NumberWERMetric` | `02` | No |
+| **ASR loopback WER** | ✅ yes | TTS → ASR round-trip then `jiwer.wer` → `ASRLoopbackWERMetric` | `03_tts_audio_metrics.py` | No |
+| **pronunciation flags** | ⚠️ partial | Requires an **audio model / forced alignment** outside DeepEval; pass your pre-computed score in via `metadata` | `03` (reads `metadata`) | No |
+| **intelligibility** | ⚠️ partial | Requires a **MOS / STOI prediction model**; pass the 0–1 score in via `metadata` | `03` (reads `metadata`) | No |
+| **time to first audio** | ✅ yes (threshold) | Instrument timing → `metadata['ttfa_s']` → `TimeToFirstAudioMetric` | `04_system_metrics.py` (part A) | No |
+| **end-to-end turn latency** | ✅ yes (threshold) | Instrument timing → `LLMTestCase.completion_time` → `MaxLatencyMetric` | `04` (part A) | No |
+| **cost per minute** | ❌ not a per-turn metric | **Aggregate** = total cost / total audio minutes; compute in plain Python | `04` (part B, **separate**) | No |
+| **failure rate** | ❌ not a per-turn metric | **Aggregate** = failed turns / total turns; compute in plain Python | `04` (part B, **separate**) | No |
 
-## 为什么这样分组(放一起 vs 分开)
+## Why These Groups (Together vs. Separate)
 
-1. **翻译指标 + 医疗安全指标** → 都在评判**同一条译文**(`input`=原文,`actual_output`=机器译文,`expected_output`=参考译文)。所以共用一个 `LLMTestCase`,在 `01` 里一次 `evaluate()` 全部测完。
-2. **STT 指标** → 评判**转写文本**(`expected_output`=人工转写,`actual_output`=ASR 结果)。和翻译的 `actual_output` 含义不同 → 必须单独放 `02`。`02` 全部确定性、**不需要 key**。
-3. **TTS/音频指标** → 评判**合成语音**。回环 WER 能从文本算;发音/可懂度的"打分"在音频模型里,DeepEval 只能接收你算好的数值(经 `metadata`)→ 一起报告但只有回环 WER 是本文件算的,放 `03`。
-4. **系统指标** → 不是给"输出内容"打分:
-   - **每轮**有值的(延迟、首音时间)→ 可包成 DeepEval 门槛 metric,一起测(`04` A 部分)。
-   - **跨多轮**才有意义的(每分钟成本、失败率)→ 没有"单条 test case 的分数",所以**不是** DeepEval metric,用普通 Python 聚合(`04` B 部分,故意分开)。
+1. **Translation + medical safety metrics** → both judge **the same translated text** (`input` = source, `actual_output` = machine translation, `expected_output` = reference translation). They share one `LLMTestCase` and run together in `01`.
+2. **STT metrics** → judge **transcribed text** (`expected_output` = human transcript, `actual_output` = ASR output). The `actual_output` means something different from translation → must live in `02`. All deterministic, **no key required**.
+3. **TTS / audio metrics** → judge **synthesized audio**. Loopback WER can be computed from text; pronunciation / intelligibility scores come from external audio models and are passed in via `metadata` → grouped in `03`.
+4. **System metrics** → not scoring "output content":
+   - **Per-turn** values (latency, time-to-first-audio) → can be wrapped as DeepEval threshold metrics and run together in `04` part A.
+   - **Cross-turn aggregates** (cost per minute, failure rate) → no meaningful per-test-case score exists, so they are **not** DeepEval metrics; computed in plain Python in `04` part B.
 
-> 关键限制:`evaluate()` 会让**每个 metric 跑在每条 test case 上**。如果把翻译和 STT 的 test case 混在一次调用里,`WERMetric` 也会去算翻译那条 → 得到无意义的分数。这就是必须按阶段分文件的根本原因。
+> **Key constraint:** `evaluate()` runs **every metric against every test case**. If you mix translation and STT test cases in one call, `WERMetric` will also run on the translation case and produce a meaningless score. Splitting by stage is the fix.
 
-## 方向(direction)别搞反
+## Score Direction
 
-| 类型 | 例子 | 判定 |
+| Type | Examples | Pass condition |
 |---|---|---|
-| 越高越好(accuracy/质量) | chrF++、COMET、number/unit accuracy、GEval、intelligibility | `score >= threshold` 才 pass |
-| 越低越好(错误率) | WER、CER、medical-term/number WER、loopback WER、pronunciation flag rate、latency | `score <= threshold` 才 pass |
+| Higher is better (quality / accuracy) | chrF++, COMET, number/unit accuracy, GEval, intelligibility | `score >= threshold` |
+| Lower is better (error rate) | WER, CER, medical-term/number WER, loopback WER, pronunciation flag rate, latency | `score <= threshold` |
 
-## 怎么跑
+## Running the Scripts
 
 ```bash
-# 先装好(已在 pyproject):deepeval, jiwer, sacrebleu, python-dotenv
+# Install dependencies (already in pyproject): deepeval, jiwer, sacrebleu, python-dotenv
 uv sync
 
-# 无需 key,直接跑:
+# No API key required:
 uv run python pipeline_metrics/02_stt_metrics.py
 uv run python pipeline_metrics/03_tts_audio_metrics.py
 uv run python pipeline_metrics/04_system_metrics.py
 
-# 需要 OPENAI_API_KEY(GEval 临床判官):先把 key 写进 .env
+# Requires OPENAI_API_KEY (GEval clinical judge) — add key to .env first:
 uv run python pipeline_metrics/01_translation_metrics.py
-# 想顺带跑 COMET(需 `uv add unbabel-comet`,会下大模型):
+
+# Also run COMET (requires `uv add unbabel-comet`, downloads a large model):
 USE_COMET=1 uv run python pipeline_metrics/01_translation_metrics.py
 ```
 
-> 词典是占位用的小样本:`_common.py` 里的 `UNIT_LEXICON`、`MEDICAL_TERM_LEXICON` 请换成你自己的临床词表;医学语义类(drug/negation/frequency/critical-fact)用 GEval 比写死规则更鲁棒、且跨语言通用。
+> The lexicons in `_common.py` (`UNIT_LEXICON`, `MEDICAL_TERM_LEXICON`) are small placeholder samples — replace them with your own clinical terminology. The semantic metrics (drug / negation / frequency / critical-fact accuracy) use GEval rather than hard-coded rules because it is more robust and language-pair-agnostic.
